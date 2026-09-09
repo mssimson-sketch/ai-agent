@@ -1,10 +1,11 @@
 """
-Голосовой модуль: Edge-TTS + офлайн фолбэк + защита от зависаний
+Голосовой модуль: Edge-TTS + офлайн фолбэк + безопасный async
 """
 import os
 import re
 import time
 import asyncio
+import concurrent.futures
 import pygame
 import edge_tts
 import pyttsx3
@@ -27,7 +28,6 @@ class VoiceEngine:
             self.pygame_ok = True
         except Exception:
             self.pygame_ok = False
-            print("⚠️ pygame.mixer не инициализирован. Будет использован офлайн-голос.")
 
         print("🎤 Калибровка микрофона...")
         try:
@@ -55,29 +55,36 @@ class VoiceEngine:
         text = re.sub(r'\n+', '. ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         if not re.search(r'[а-яА-ЯёЁa-zA-Z]', text):
-            return "Задача выполнена. Всё готово."
+            return "Готово."
         return text[:400] + ("..." if len(text) > 400 else "")
 
     def speak(self, text: str):
         clean = self._clean_for_speech(text)
-        if not clean:
-            print("[🔇 Голос: текст пуст после очистки]")
-            return
-        
-        print(f"[🗣️ Озвучка: {clean}]")
+        if not clean: return
+        print(f"\n🤖 {Config.AGENT_NAME}: {clean}")
         self.is_speaking = True
         try:
-            asyncio.run(self._speak_edge_async(clean))
+            # Безопасный запуск async из синхронного контекста
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                executor.submit(self._run_async, self._speak_edge_async(clean)).result(timeout=15.0)
         except Exception as e:
             print(f"[⚠️ Edge-TTS сбой: {e}] → переключаюсь на офлайн")
             self._speak_fallback(clean)
         finally:
             self.is_speaking = False
 
+    def _run_async(self, coro):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
     async def _speak_edge_async(self, text: str):
         temp_file = os.path.join(Config.BASE_DIR, "temp_voice.mp3")
         tts = edge_tts.Communicate(text, VOICE_NAME)
-        await asyncio.wait_for(tts.save(temp_file), timeout=12.0)
+        await asyncio.wait_for(tts.save(temp_file), timeout=10.0)
         
         if os.path.exists(temp_file) and os.path.getsize(temp_file) > 2048 and self.pygame_ok:
             pygame.mixer.music.load(temp_file)
@@ -89,7 +96,7 @@ class VoiceEngine:
             try: os.remove(temp_file)
             except: pass
         else:
-            raise RuntimeError("Аудио не сгенерировано или pygame недоступен")
+            raise RuntimeError("Аудио не сгенерировано")
 
     def _speak_fallback(self, text: str):
         print("[🔊 Офлайн-голос (pyttsx3)]")
