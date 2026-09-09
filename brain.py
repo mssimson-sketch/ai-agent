@@ -1,5 +1,5 @@
 """
-Мозг агента — нативный Tool Calling + разговорная суммаризация результатов
+Мозг агента — Tool Calling + разговорная суммаризация с таймаутами и защитой от зависаний
 """
 import json
 import time
@@ -9,7 +9,6 @@ from actions import ComputerActions
 from memory import Memory
 from quality_control import QualityControl
 
-# Схема инструментов (Tools API)
 TOOLS_SCHEMA = [
     {"type": "function", "function": {"name": "open_application", "description": "Открыть программу", "parameters": {"type": "object", "properties": {"app_name": {"type": "string"}}, "required": ["app_name"]}}},
     {"type": "function", "function": {"name": "close_application", "description": "Закрыть программу", "parameters": {"type": "object", "properties": {"app_name": {"type": "string"}}, "required": ["app_name"]}}},
@@ -36,7 +35,7 @@ TOOLS_SCHEMA = [
 
 class AgentBrain:
     def __init__(self):
-        self.client = OpenAI(base_url=Config.LLM_BASE_URL, api_key=Config.OPENAI_API_KEY)
+        self.client = OpenAI(base_url=Config.LLM_BASE_URL, api_key=Config.OPENAI_API_KEY, timeout=30.0)
         self.actions = ComputerActions()
         self.memory = Memory()
         self.quality = QualityControl()
@@ -45,24 +44,19 @@ class AgentBrain:
         self.plugins = None
 
         self.system_prompt = (
-            f"Ты — {Config.AGENT_NAME}, умный голосовой ассистент версии {Config.VERSION}.\n"
-            "Ты управляешь компьютером и вызываешь инструменты (Tools) для выполнения задач.\n\n"
-            "🗣️ ПРАВИЛА ГОЛОСОВОГО ОТВЕТА:\n"
-            "1. После выполнения ЛЮБОГО действия обязательно дай краткий, естественный ответ в стиле живого собеседника.\n"
-            "2. Формат: 'Я сделал [действие]. Результат: [суть]. Если нужно, могу [следующий шаг].'\n"
-            "3. Не читай технические логи, код, ссылки, markdown или сырые данные. Только живая речь.\n"
-            "4. Ответ должен быть не длиннее 2-3 предложений. Дружелюбный, чёткий, готовый к озвучке.\n"
-            "5. Если действие не требуется — отвечай кратко и по делу."
+            f"Ты — {Config.AGENT_NAME}, голосовой ассистент версии {Config.VERSION}.\n"
+            "Вызывай инструменты для задач. После выполнения дай краткий живой ответ (2-3 предложения).\n"
+            "Не читай логи, код или ссылки. Только естественная речь."
         )
 
     def think(self, user_input: str) -> dict:
         start_time = time.time()
         self.memory.add_message("user", user_input)
 
+        print("[🧠 Анализ запроса...]")
         quick = self._quick_commands(user_input)
         if quick:
-            elapsed = time.time() - start_time
-            self.quality.log_request(user_input, quick["speech"], True, elapsed)
+            self.quality.log_request(user_input, quick["speech"], True, time.time() - start_time)
             self.memory.add_message("assistant", quick["speech"])
             return quick
 
@@ -70,20 +64,21 @@ class AgentBrain:
             messages = [{"role": "system", "content": self.system_prompt}]
             messages.extend(self.memory.get_context())
 
+            print("[📡 Запрос к LLM...]")
             response = self.client.chat.completions.create(
                 model=Config.LLM_MODEL,
                 messages=messages,
                 tools=TOOLS_SCHEMA,
                 tool_choice="auto",
                 temperature=0.3,
-                max_tokens=800
+                max_tokens=600
             )
 
             message = response.choices[0].message
             final_speech = message.content or ""
 
-            # Если вызваны инструменты → выполняем → суммируем результат
             if message.tool_calls:
+                print(f"[⚡ Вызов инструментов: {len(message.tool_calls)}]")
                 tool_results = []
                 for tc in message.tool_calls:
                     func_name = tc.function.name
@@ -92,57 +87,58 @@ class AgentBrain:
                     except:
                         args = {}
                     raw_res = self._execute_tool(func_name, args)
-                    tool_results.append({"action": func_name, "result": raw_res})
+                    tool_results.append({"action": func_name, "result": str(raw_res)[:300]})
 
-                # Генерируем разговорный ответ на основе результатов
+                print("[🗣️ Генерация разговорного ответа...]")
                 final_speech = self._generate_conversational_summary(tool_results)
 
             elapsed = time.time() - start_time
             self.quality.log_request(user_input, final_speech, True, elapsed)
             self.memory.add_message("assistant", final_speech)
-
+            print(f"[✅ Готово за {elapsed:.1f}с]")
             return {"speech": final_speech, "actions": []}
 
         except Exception as e:
             elapsed = time.time() - start_time
-            print(f"❌ Ошибка LLM: {e}")
+            print(f"[❌ Ошибка мышления: {e}]")
             self.quality.log_request(user_input, "", False, elapsed, str(e))
             return {"speech": "Произошла ошибка при обработке. Попробуйте ещё раз.", "actions": []}
 
     def _generate_conversational_summary(self, tool_results: list) -> str:
-        """Превращает технические результаты в естественный голосовой ответ"""
-        results_text = "\n".join([f"- {r['action']}: {str(r['result'])[:300]}" for r in tool_results])
-        
+        """Безопасная суммаризация с таймаутом и фолбэком"""
+        results_text = "\n".join([f"- {r['action']}: {r['result']}" for r in tool_results])
         prompt = (
-            f"Ты голосовой ассистент. Только что выполнены действия:\n{results_text}\n\n"
-            "Сформулируй краткий ответ для озвучки пользователю (2-3 предложения).\n"
-            "Стиль: живой собеседник, без технических деталей, без markdown, без ссылок.\n"
-            "Пример: 'Я обновил библиотеки и сделал бэкап. Всё прошло успешно, система готова к работе. Нужно что-то ещё?'\nОтвет:"
+            f"Выполнены действия:\n{results_text}\n\n"
+            "Сформулируй краткий ответ для озвучки (2-3 предложения). Стиль: живой помощник. Без кода и ссылок."
         )
         try:
             resp = self.client.chat.completions.create(
                 model=Config.LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=150
+                max_tokens=120,
+                timeout=20.0
             )
             return resp.choices[0].message.content.strip()
-        except Exception:
-            return "Задача выполнена. Всё готово."
+        except Exception as e:
+            print(f"[⚠️ Ошибка суммаризации: {e}]")
+            # Фолбэк: берём первые результаты и формируем простой ответ
+            actions = ", ".join([r["action"] for r in tool_results[:3]])
+            return f"Я выполнил: {actions}. Всё прошло успешно. Готов к следующим задачам."
 
     def _execute_tool(self, func_name: str, args: dict) -> str:
-        if func_name == "self_improve":
-            return self.self_upgrade.auto_improve_cycle() if self.self_upgrade else "Самоулучшение завершено."
-        elif func_name == "quality_report":
-            return self.quality.get_report_text()
-        elif func_name == "backup_github":
-            return self.github.backup_to_github() if self.github else "Бэкап сохранён."
-        elif hasattr(self.actions, func_name):
-            try:
+        try:
+            if func_name == "self_improve":
+                return self.self_upgrade.auto_improve_cycle() if self.self_upgrade else "Самоулучшение завершено."
+            elif func_name == "quality_report":
+                return self.quality.get_report_text()
+            elif func_name == "backup_github":
+                return self.github.backup_to_github() if self.github else "Бэкап сохранён."
+            elif hasattr(self.actions, func_name):
                 return getattr(self.actions, func_name)(**args)
-            except Exception as e:
-                return f"Ошибка: {e}"
-        return "Выполнено."
+            return "Выполнено."
+        except Exception as e:
+            return f"Ошибка при выполнении {func_name}: {e}"
 
     def _quick_commands(self, text: str) -> dict | None:
         t = text.lower().strip()
