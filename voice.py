@@ -1,11 +1,12 @@
 """
-Голосовой модуль с очисткой текста и живым нейросетевым голосом (Edge-TTS)
+Голосовой модуль: Edge-TTS (основной) + pyttsx3 (авто-фолбэк)
 """
 import os
 import re
 import asyncio
 import pygame
 import edge_tts
+import pyttsx3
 import speech_recognition as sr
 from config import Config
 
@@ -18,6 +19,11 @@ class VoiceEngine:
         self.microphone = sr.Microphone()
         self.is_speaking = False
         
+        # Локальный голос-резерв
+        self.fallback_engine = pyttsx3.init()
+        self._setup_fallback()
+
+        # Аудиоплеер
         try:
             pygame.mixer.init()
         except Exception:
@@ -31,24 +37,39 @@ class VoiceEngine:
         except Exception as e:
             print(f"⚠️ Микрофон: {e}")
 
+    def _setup_fallback(self):
+        """Настройка офлайн-голоса"""
+        self.fallback_engine.setProperty('rate', 170)
+        self.fallback_engine.setProperty('volume', 1.0)
+        voices = self.fallback_engine.getProperty('voices')
+        for v in voices:
+            if any(tag in v.name.lower() for tag in ['russian', 'ru', 'irina', 'milena', 'pavel']):
+                self.fallback_engine.setProperty('voice', v.id)
+                break
+
     def _clean_for_speech(self, text: str) -> str:
-        """Очищает текст от технического мусора перед озвучкой"""
+        """Очистка текста перед озвучкой"""
         if not text:
             return ""
-        # Удаляем код, markdown, ссылки, спецсимволы
+        # Удаляем код, markdown, ссылки, технические символы
         text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
         text = re.sub(r'`[^`]*`', '', text)
         text = re.sub(r'https?://\S+', '', text)
         text = re.sub(r'[#*_~>|{}\[\]]', '', text)
         text = re.sub(r'\n+', '. ', text)
         text = re.sub(r'\s+', ' ', text).strip()
-        # Ограничиваем длину для комфортного прослушивания
-        if len(text) > 450:
-            text = text[:447] + "..."
+        
+        # Если после очистки пусто или только цифры/знаки
+        if not re.search(r'[а-яА-ЯёЁa-zA-Z]', text):
+            return "Готово."
+            
+        # Ограничиваем длину для комфортной речи
+        if len(text) > 400:
+            text = text[:397] + "..."
         return text
 
     def speak(self, text: str):
-        """Озвучить текст живым голосом"""
+        """Озвучка с автоматическим переключением на офлайн при ошибке"""
         clean_text = self._clean_for_speech(text)
         if not clean_text:
             return
@@ -57,29 +78,43 @@ class VoiceEngine:
         self.is_speaking = True
 
         try:
-            temp_file = os.path.join(Config.BASE_DIR, "temp_voice.mp3")
-            
-            async def _generate():
-                tts = edge_tts.Communicate(clean_text, VOICE_NAME, rate="+5%")
-                await tts.save(temp_file)
-
-            asyncio.run(_generate())
-
-            if os.path.exists(temp_file):
-                pygame.mixer.music.load(temp_file)
-                pygame.mixer.music.play()
-                while pygame.mixer.music.get_busy():
-                    pygame.time.Clock().tick(10)
-                pygame.mixer.music.unload()
-                try: os.remove(temp_file)
-                except: pass
+            self._speak_edge(clean_text)
         except Exception as e:
-            print(f"❌ Ошибка синтеза речи: {e}")
+            print(f"⚠️ Edge-TTS недоступен: {e}")
+            print("🔄 Переключаюсь на локальный голос...")
+            self._speak_fallback(clean_text)
         finally:
             self.is_speaking = False
 
+    def _speak_edge(self, text: str):
+        """Основной нейросетевой голос"""
+        temp_file = os.path.join(Config.BASE_DIR, "temp_voice.mp3")
+        
+        async def _generate():
+            # Убран параметр rate для стабильности в новых версиях edge_tts
+            tts = edge_tts.Communicate(text, VOICE_NAME)
+            await tts.save(temp_file)
+
+        asyncio.run(_generate())
+
+        if os.path.exists(temp_file) and os.path.getsize(temp_file) > 1024:
+            pygame.mixer.music.load(temp_file)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+            pygame.mixer.music.unload()
+            try: os.remove(temp_file)
+            except: pass
+        else:
+            raise RuntimeError("Пустой аудиофайл")
+
+    def _speak_fallback(self, text: str):
+        """Резервный офлайн-голос"""
+        self.fallback_engine.say(text)
+        self.fallback_engine.runAndWait()
+
     def listen(self, timeout=7, phrase_limit=15) -> str:
-        """Слушать микрофон"""
+        """Распознавание речи"""
         try:
             with self.microphone as source:
                 print("👂 Слушаю...")
