@@ -1,5 +1,5 @@
 """
-Мозг агента — Tool Calling + разговорная суммаризация с таймаутами и защитой от зависаний
+Мозг агента — Tool Calling + строгая разговорная суммаризация
 """
 import json
 import time
@@ -32,7 +32,6 @@ TOOLS_SCHEMA = [
     {"type": "function", "function": {"name": "lock_screen", "description": "Заблокировать экран", "parameters": {"type": "object", "properties": {}}}}
 ]
 
-
 class AgentBrain:
     def __init__(self):
         self.client = OpenAI(base_url=Config.LLM_BASE_URL, api_key=Config.OPENAI_API_KEY, timeout=30.0)
@@ -45,7 +44,7 @@ class AgentBrain:
 
         self.system_prompt = (
             f"Ты — {Config.AGENT_NAME}, голосовой ассистент версии {Config.VERSION}.\n"
-            "Вызывай инструменты для задач. После выполнения дай краткий живой ответ (2-3 предложения).\n"
+            "Вызывай инструменты для задач. После выполнения дай краткий живой ответ.\n"
             "Не читай логи, код или ссылки. Только естественная речь."
         )
 
@@ -86,6 +85,7 @@ class AgentBrain:
                         args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                     except:
                         args = {}
+                    print(f"[🔧 Выполняю: {func_name}({args})]")
                     raw_res = self._execute_tool(func_name, args)
                     tool_results.append({"action": func_name, "result": str(raw_res)[:300]})
 
@@ -96,6 +96,7 @@ class AgentBrain:
             self.quality.log_request(user_input, final_speech, True, elapsed)
             self.memory.add_message("assistant", final_speech)
             print(f"[✅ Готово за {elapsed:.1f}с]")
+            print(f"[💬 Ответ для озвучки: {final_speech}]")
             return {"speech": final_speech, "actions": []}
 
         except Exception as e:
@@ -105,24 +106,26 @@ class AgentBrain:
             return {"speech": "Произошла ошибка при обработке. Попробуйте ещё раз.", "actions": []}
 
     def _generate_conversational_summary(self, tool_results: list) -> str:
-        """Безопасная суммаризация с таймаутом и фолбэком"""
         results_text = "\n".join([f"- {r['action']}: {r['result']}" for r in tool_results])
         prompt = (
             f"Выполнены действия:\n{results_text}\n\n"
-            "Сформулируй краткий ответ для озвучки (2-3 предложения). Стиль: живой помощник. Без кода и ссылок."
+            "Сформулируй ответ СТРОГО по шаблону:\n"
+            "1. Что я сделал (1 предложение)\n"
+            "2. Краткий результат/суть (1 предложение)\n"
+            "3. Готовность к следующей задаче (1 предложение)\n"
+            "Без markdown, без кода, без ссылок. Только живой русский текст."
         )
         try:
             resp = self.client.chat.completions.create(
                 model=Config.LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+                temperature=0.1,
                 max_tokens=120,
-                timeout=20.0
+                timeout=15.0
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
             print(f"[⚠️ Ошибка суммаризации: {e}]")
-            # Фолбэк: берём первые результаты и формируем простой ответ
             actions = ", ".join([r["action"] for r in tool_results[:3]])
             return f"Я выполнил: {actions}. Всё прошло успешно. Готов к следующим задачам."
 
