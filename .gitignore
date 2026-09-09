@@ -1,0 +1,33 @@
+# Секретные ключи
+.env
+.env.*
+!.env.example
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Голос / временные файлы
+temp_voice.mp3
+*.wav
+
+# Логи и runtime-данные
+logs/
+*.log
+conversation_log.json
+quality_log.json
+error_log.json
+upgrade_log.json
+
+# Резервные копии
+backups/
+
+# Временные файлы
+_temp_run.py
+*.tmp
+
+# IDE
+.vscode/
+.idea/
