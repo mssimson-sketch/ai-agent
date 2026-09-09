@@ -189,7 +189,7 @@ class AIAgent:
         self._shutdown()
 
     def run_hybrid(self):
-        """Гибридный режим: текст + горячая клавиша"""
+        """Гибридный режим: текст + горячая клавиша F5 для голоса"""
         self.running = True
         self.monitor.start()
 
@@ -201,8 +201,10 @@ class AIAgent:
                 text = self.voice.listen(timeout=7)
                 if text:
                     result = self.brain.think(text)
-                    if result.get("speech"):
-                        self.voice.speak(result["speech"])
+                    speech = result.get("speech", "")
+                    if speech:
+                        print(f"[🔊 Вызов голоса...]")
+                        self.voice.speak(speech)
 
             kb.add_hotkey('F5', on_f5)
             print("🔀 ГИБРИДНЫЙ РЕЖИМ")
@@ -213,7 +215,12 @@ class AIAgent:
                     text = input("👤 Вы (или F5): ").strip()
                     if not text:
                         continue
-                    self.running = self.process(text)
+                    result = self.brain.think(text)
+                    speech = result.get("speech", "")
+                    if speech:
+                        print(f"[🔊 Вызов голоса...]")
+                        self.voice.speak(speech)
+                    self.running = self.process(text) if False else True # process уже вызван через think
                 except KeyboardInterrupt:
                     break
 
