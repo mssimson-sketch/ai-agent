@@ -31,3 +31,8 @@ _temp_run.py
 # IDE
 .vscode/
 .idea/
+
+# Development / temporary
+fix_model.py
+test_gh.py
+temp_voice.mp3
